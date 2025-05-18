@@ -1,289 +1,464 @@
+"""
+RAG Assistant with FAISS Vector Storage
+
+This script implements a Retrieval-Augmented Generation (RAG) system with:
+- FAISS vector storage for efficient embedding persistence
+- ReAct agent pattern for step-by-step reasoning
+- Dual-display Gradio interface showing both answers and reasoning process
+- NVIDIA API integration for LLM and embedding models
+"""
+
 import os
-import base64
-import requests
-import json
-import gradio as gr
+import re
+import io
+import sys
+import hashlib
+import faiss
+import time
+import numpy as np
+from pathlib import Path
+from contextlib import redirect_stdout
 from dotenv import load_dotenv
-from openai import OpenAI as DirectOpenAI
+import gradio as gr
+
+# LlamaIndex imports
+from llama_index.core import (
+    VectorStoreIndex, 
+    SimpleDirectoryReader, 
+    Settings, 
+    StorageContext,
+    load_index_from_storage
+)
 from llama_index.core.agent import ReActAgent
-from llama_index.core.tools import FunctionTool
+from llama_index.core.tools import QueryEngineTool, ToolMetadata
+from llama_index.core.node_parser import SentenceSplitter
 from llama_index.llms.openai_like import OpenAILike
-from typing import Optional, List, Dict, Any
-from gradio import ChatMessage
+from llama_index.embeddings.litellm import LiteLLMEmbedding
+from llama_index.vector_stores.faiss import FaissVectorStore
+
+# --- Configuration ---
 
 # Load environment variables
 load_dotenv()
 
-# API configurations
+# NVIDIA API configuration
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 if not NVIDIA_API_KEY:
     raise ValueError("NVIDIA_API_KEY environment variable not set. Please set it before running.")
 
 NVIDIA_API_BASE = "https://integrate.api.nvidia.com/v1"
-MODEL_NAME = "nvidia/llama-3.1-nemotron-ultra-253b-v1"
-NEVA_INVOKE_URL = "https://ai.api.nvidia.com/v1/vlm/nvidia/neva-22b"
+LLM_MODEL_NAME = "nvidia/llama-3.1-nemotron-ultra-253b-v1"
+EMBEDDING_MODEL_NAME = "baai/bge-m3"
+EMBEDDING_DIMENSION = 1024  # Dimension for BGE-M3 embeddings
 
-# Initialize LlamaIndex OpenAILike wrapper for Nemotron
-llm = OpenAILike(
-    model=MODEL_NAME,
-    api_base=NVIDIA_API_BASE,
-    api_key=NVIDIA_API_KEY,
-    is_chat_model=True,
-    temperature=0.6,
-    max_tokens=4096,
-    additional_kwargs={
-        "top_p": 0.95,
-        "frequency_penalty": 0,
-        "presence_penalty": 0,
-    }
-)
+# Storage configuration
+PERSIST_DIR = Path("./stored_indexes")
+PERSIST_DIR.mkdir(exist_ok=True, parents=True)
 
-def encode_image(image):
-    """Convert image to base64 string"""
-    if image is None:
-        return None
-    with open(image, "rb") as f:
-        return base64.b64encode(f.read()).decode()
+# Chunk configuration
+CHUNK_SIZE = 256
+CHUNK_OVERLAP = 20
 
-def process_image_with_neva(image_path: str, query: str) -> str:
-    """Process an image using Neva API and return the description"""
-    # Add validation to ensure image path is provided
-    if not image_path or not isinstance(image_path, str):
-        return "Error: Invalid image path provided"
-        
-    print(f"Processing image: {image_path} with query: {query}")
+# FAISS configuration
+FAISS_USE_GPU = False  # Set to True if you have GPU support with faiss-gpu
+FAISS_NPROBE = 10      # Number of cells to probe (trade-off between accuracy and speed)
+
+# Global state
+global_agent = None
+current_index = None
+
+# --- Core Functions ---
+
+def setup_models():
+    """Initialize the LLM and embedding models from NVIDIA's API"""
+    # Initialize the LLM (Chat Model)
+    llm = OpenAILike(
+        model=LLM_MODEL_NAME,
+        api_base=NVIDIA_API_BASE,
+        api_key=NVIDIA_API_KEY,
+        is_chat_model=True,
+        temperature=0.6,
+        max_tokens=2048,
+    )
     
-    headers = {
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
-        "Accept": "text/event-stream"
-    }
+    # Initialize the Embedding Model
+    embed_model = LiteLLMEmbedding(
+        model_name=EMBEDDING_MODEL_NAME,
+        api_key=NVIDIA_API_KEY,
+        api_base=NVIDIA_API_BASE,
+        litellm_kwargs={
+            "api_key": NVIDIA_API_KEY,
+            "api_base": NVIDIA_API_BASE,
+            "encoding_format": "float",
+        }
+    )
     
-    image_b64 = encode_image(image_path)
-    if not image_b64:
-        return f"Error: Could not encode image at {image_path}"
-        
-    content = f'{query} <img src="data:image/jpg;base64,{image_b64}" />'
+    # Configure global settings
+    Settings.llm = llm
+    Settings.embed_model = embed_model
     
-    messages = [{"role": "user", "content": content}]
-    
-    payload = {
-        "messages": messages,
-        "max_tokens": 1024,
-        "temperature": 0.20,
-        "top_p": 0.70,
-        "seed": 0,
-        "stream": True
-    }
+    return llm, embed_model
 
-    try:
-        response = requests.post(NEVA_INVOKE_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        
-        full_response = ""
-        for line in response.iter_lines():
-            if not line:
-                continue
-                
-            try:
-                decoded_line = line.decode("utf-8").strip()
-                if not decoded_line:
-                    continue
-                    
-                if decoded_line.startswith("data: "):
-                    decoded_line = decoded_line[6:]
-                
-                if decoded_line == "[DONE]":
-                    continue
-                
-                json_response = json.loads(decoded_line)
-                
-                if "choices" in json_response and len(json_response["choices"]) > 0:
-                    delta = json_response["choices"][0].get("delta", {})
-                    if "content" in delta and delta["content"]:
-                        full_response += delta["content"]
-                        
-            except json.JSONDecodeError as e:
-                print(f"Error decoding JSON: {e}")
-                continue
-            except Exception as e:
-                print(f"Error processing response: {e}")
-                continue
-                
-        print(f"Image processing completed with response length: {len(full_response)}")
-        return full_response
-                
-    except Exception as e:
-        error_msg = f"Error processing image: {str(e)}"
-        print(error_msg)
-        return error_msg
+def get_index_id(file_path):
+    """Generate a unique ID for the index based on the file path"""
+    return hashlib.md5(str(file_path).encode()).hexdigest()
 
-# Create the image processing tool
-image_tool = FunctionTool.from_defaults(
-    fn=process_image_with_neva,
-    name="process_image",
-    description="Use this tool when you need to analyze or describe an image. Input should be the image path and a query about what to analyze in the image."
-)
-
-# Initialize the ReAct agent with tools
-agent = ReActAgent.from_tools(
-    [image_tool],
-    llm=llm,
-    verbose=True,
-    system_prompt="""You are a helpful AI assistant that can analyze both text and images. 
-    When a user uploads an image and asks about it, use the process_image tool to analyze it.
-    Be conversational, helpful, and focus on addressing the user's needs.
-    
-    Do NOT include your thinking process or tool calls in your final answer to the user.
-    Only return the final analysis or response that would be helpful to the user.
+def create_index_from_file(file_path, force_reload=False):
     """
-)
-
-def gradio_chat(message, history, image=None):
-    """Handle chat interactions through Gradio"""
-    # Initialize empty history if None
-    if history is None:
-        history = []
+    Create or load a vector index from a file using FAISS persistence
     
-    # Add user message to history
-    if image:
-        # Format for display to show image was uploaded
-        display_msg = f"{message} [Image uploaded]" 
-        history.append({"role": "user", "content": display_msg})
-    else:
-        history.append({"role": "user", "content": message})
+    Args:
+        file_path: Path to the file to index
+        force_reload: Whether to force reloading the document even if a persisted index exists
         
-    # Show typing indicator
-    history.append({"role": "assistant", "content": "..."})
-    yield history
+    Returns:
+        VectorStoreIndex: The loaded or created index
+    """
+    # Create a unique index ID based on file path
+    index_id = get_index_id(file_path)
+    index_dir = PERSIST_DIR / index_id
+    
+    # Check if index already exists
+    if not force_reload and index_dir.exists():
+        print(f"Loading existing index from {index_dir}")
+        try:
+            start_time = time.time()
+            # Load the vector store from disk
+            vector_store = FaissVectorStore.from_persist_dir(persist_dir=str(index_dir))
+            
+            # Create a storage context and load the index
+            storage_context = StorageContext.from_defaults(
+                vector_store=vector_store,
+                persist_dir=str(index_dir)
+            )
+            index = load_index_from_storage(storage_context=storage_context)
+            print(f"Successfully loaded index from disk in {time.time() - start_time:.2f} seconds")
+            
+            # Verify FAISS index is loaded properly
+            faiss_index = vector_store.client
+            if faiss_index is not None:
+                print(f"FAISS index loaded with {faiss_index.ntotal} vectors")
+                # Optimize search parameters if index is loaded correctly
+                if isinstance(faiss_index, faiss.IndexFlatL2):
+                    print("Using FAISS IndexFlatL2 for exact search")
+                elif hasattr(faiss_index, 'nprobe'):
+                    # For IndexIVF-based indexes, set nprobe
+                    faiss_index.nprobe = FAISS_NPROBE
+                    print(f"Set FAISS nprobe to {FAISS_NPROBE}")
+            else:
+                print("Warning: FAISS index not properly loaded")
+                
+            return index
+        except Exception as e:
+            print(f"Error loading index: {e}. Creating new index instead.")
+            # Continue to create new index if loading fails
+    
+    # Create new index
+    print(f"Creating new index for {file_path}")
+    index_dir.mkdir(parents=True, exist_ok=True)
     
     try:
-        # Prepare the message for the agent
-        user_message = message
-        if image:
-            user_message = f"Analyze this image: {message}\nImage path: {image}"
+        start_time = time.time()
+        
+        # Load document
+        documents = SimpleDirectoryReader(input_files=[file_path]).load_data()
+        print(f"Document loaded with {len(documents)} pages")
+        
+        # Parse into nodes
+        parser = SentenceSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+        nodes = parser.get_nodes_from_documents(documents)
+        print(f"Document parsed into {len(nodes)} nodes")
+        
+        # Create FAISS index
+        if FAISS_USE_GPU and faiss.get_num_gpus() > 0:
+            # Use IVF index for faster retrieval with many vectors
+            faiss_index = faiss.IndexIVFFlat(
+                faiss.IndexFlatL2(EMBEDDING_DIMENSION), 
+                EMBEDDING_DIMENSION, 
+                min(100, max(4, 4 * int(len(nodes) / 1000)))  # Adjust number of centroids based on document size
+            )
+            faiss_index.nprobe = FAISS_NPROBE
+            print(f"Using GPU-enabled FAISS IVFFlat index with {faiss_index.nlist} clusters")
             
-            # Show processing indicator
-            history[-1] = {
-                "role": "assistant", 
-                "content": "Analyzing your image...",
-                "metadata": {"title": "⏳ Processing"}
-            }
-            yield history
+            # Move to GPU if available
+            res = faiss.StandardGpuResources()
+            faiss_index = faiss.index_cpu_to_gpu(res, 0, faiss_index)
+        else:
+            # For smaller collections, use exact search for better accuracy
+            if len(nodes) > 1000:
+                # Use IVF index for larger collections
+                base_index = faiss.IndexFlatL2(EMBEDDING_DIMENSION)
+                faiss_index = faiss.IndexIVFFlat(
+                    base_index, 
+                    EMBEDDING_DIMENSION, 
+                    min(100, max(4, 4 * int(len(nodes) / 1000)))
+                )
+                faiss_index.nprobe = FAISS_NPROBE
+                # Need to train the index
+                print("Training FAISS index...")
+                # We would need embeddings for training, use dummy ones temporarily
+                # In production, consider pre-computing embeddings and training properly
+                dummy_data = np.random.random((max(256, len(nodes)), EMBEDDING_DIMENSION)).astype('float32')
+                faiss_index.train(dummy_data)
+                print(f"Using CPU FAISS IVFFlat index with {faiss_index.nlist} clusters")
+            else:
+                # Use exact search for small collections
+                faiss_index = faiss.IndexFlatL2(EMBEDDING_DIMENSION)
+                print("Using CPU FAISS FlatL2 index for exact search (smaller document)")
         
-        # Set up a print capture for debugging
-        import io
-        import sys
-        original_stdout = sys.stdout
-        captured_output = io.StringIO()
-        sys.stdout = captured_output
+        vector_store = FaissVectorStore(faiss_index=faiss_index)
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
         
-        # Get response from the agent
-        response = agent.chat(
-            message=user_message,
-            chat_history=[]  # Start fresh for each query
+        # Create vector index
+        index = VectorStoreIndex(nodes, storage_context=storage_context)
+        
+        # Persist the index
+        storage_context.persist(persist_dir=str(index_dir))
+        print(f"Index created and saved to {index_dir} in {time.time() - start_time:.2f} seconds")
+        
+        return index
+    except Exception as e:
+        print(f"Error creating index: {e}")
+        raise
+
+def setup_rag_agent(index, llm):
+    """Create a ReAct agent with a RAG tool"""
+    # Create a query engine from the index with optimized parameters
+    query_engine = index.as_query_engine(
+        similarity_top_k=3,            # Retrieve more contexts for better accuracy
+        vector_store_query_mode="default",  # Use default mode for FAISS
+        alpha=0.5,                     # Weight between keyword and semantic search if using hybrid
+        response_mode="compact"        # Get concise answers
+    )
+    
+    # Create a QueryEngineTool
+    rag_tool = QueryEngineTool(
+        query_engine=query_engine,
+        metadata=ToolMetadata(
+            name="paint_info",
+            description="""
+                Use this tool for ANY question about paint products, recommendations, prices, or technical specifications.
+            
+                WHEN TO USE:
+                - User asks about paint types, brands, or products
+                - User needs price information before adding to cart
+                - User needs recommendations based on their project
+                - User has technical questions about painting
+                
+                EXAMPLES:
+                - "What paint is best for kitchen cabinets?"
+                - "How much does AwesomePainter Interior Acrylic Latex cost?"
+                - "What supplies do I need for painting my living room?"
+            """,
+        ),
+    )
+    
+    # Create a ReAct agent with the tool
+    agent = ReActAgent.from_tools(
+        tools=[rag_tool],
+        llm=llm,
+        verbose=True
+    )
+    
+    return agent
+
+def initialize_system():
+    """Initialize the RAG system and return the agent"""
+    global global_agent, current_index
+    
+    try:
+        # Set up models
+        llm, embed_model = setup_models()
+        
+        # Create path to the sample file
+        script_dir = Path(__file__).parent
+        sample_file = script_dir / "test_data" / "test_painting_llm_rag.pdf"
+        
+        # Ensure the test_data directory exists
+        if not sample_file.exists():
+            return f"Error: Sample file not found at {sample_file}. Make sure the test_data directory contains test_painting_llm_rag.pdf"
+        
+        # Create index
+        current_index = create_index_from_file(sample_file, force_reload=False)
+        
+        # Set up agent
+        global_agent = setup_rag_agent(current_index, llm)
+        
+        return "System initialized! You can now ask questions about paint products."
+    except Exception as e:
+        return f"Error initializing system: {str(e)}"
+
+# --- Gradio UI Functions ---
+
+def format_chain_of_thought(cot_text):
+    """Format the captured chain of thought with emojis and markdown"""
+    # Clean ANSI color codes and other artifacts
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    cot_text = ansi_escape.sub('', cot_text)
+    
+    # Format the Chain of Thought with emojis
+    formatted_cot = ""
+    lines = cot_text.split('\n')
+    
+    for line in lines:
+        # Skip debugging/step information lines
+        if line.strip().startswith(">") or "Running step" in line or not line.strip():
+            continue
+            
+        # Apply consistent emoji formatting
+        if line.strip().startswith("Thought:"):
+            formatted_cot += f"🤔 **{line.strip()}**\n\n"
+        elif line.strip().startswith("Action:"):
+            formatted_cot += f"🛠️ **{line.strip()}**\n\n"
+        elif line.strip().startswith("Action Input:"):
+            formatted_cot += f"📥 **{line.strip()}**\n\n"
+        elif line.strip().startswith("Observation:"):
+            formatted_cot += f"👁️ **{line.strip()}**\n\n"
+        elif line.strip().startswith("Answer:"):
+            formatted_cot += f"✅ **{line.strip()}**\n\n"
+        elif line.strip():
+            formatted_cot += f"{line.strip()}\n\n"
+    
+    return formatted_cot
+
+def user_message(message, history):
+    """Add user message to chatbot"""
+    return "", history + [{"role": "user", "content": message}]
+
+def bot_message(history):
+    """Generate bot response for the latest message and capture the chain of thought"""
+    if global_agent is None:
+        return history + [{"role": "assistant", "content": "System not initialized properly. Please restart the application."}], "System not initialized"
+    
+    user_message = history[-1]["content"]
+    
+    try:
+        # Capture the agent's verbose output
+        f = io.StringIO()
+        with redirect_stdout(f):
+            start_time = time.time()
+            response = global_agent.query(user_message)
+            end_time = time.time()
+        
+        # Format the captured output
+        cot_text = f.getvalue()
+        formatted_cot = format_chain_of_thought(cot_text)
+        
+        # Add performance information
+        query_time = end_time - start_time
+        performance_info = f"\n\n*Query processed in {query_time:.2f} seconds*"
+        
+        # Add agent's response to chat history
+        history.append({"role": "assistant", "content": str(response) + performance_info})
+        
+        return history, formatted_cot
+    except Exception as e:
+        error_message = f"Error: {str(e)}"
+        history.append({"role": "assistant", "content": error_message})
+        return history, f"🔴 **Error occurred:**\n\n{error_message}"
+
+def use_sample_question(sample_question, history):
+    """Use a sample question"""
+    return "", history + [{"role": "user", "content": sample_question}]
+
+def clear_chat(initialize_message):
+    """Clear the chat history"""
+    return [{"role": "assistant", "content": initialize_message}], "", ""
+
+def create_ui():
+    """Create a Gradio UI for the RAG system"""
+    # Initialize the system on startup
+    initialize_message = initialize_system()
+    
+    with gr.Blocks(title="RAG Assistant", theme=gr.themes.Soft()) as demo:
+        gr.Markdown("# 🎨 Paint Product RAG Assistant")
+        gr.Markdown("Ask questions about paint products, recommendations, prices, or technical specifications.")
+        
+        with gr.Row():
+            # Left column for chat
+            with gr.Column(scale=6):
+                chatbot = gr.Chatbot(
+                    show_label=False,
+                    height=500,
+                    type='messages',
+                    value=[{"role": "assistant", "content": initialize_message}]
+                )
+                
+                with gr.Row():
+                    question_input = gr.Textbox(
+                        placeholder="Ask a question about paint products...",
+                        scale=10,
+                        show_label=False,
+                        container=False
+                    )
+                    submit_button = gr.Button("Submit", variant="primary", scale=1)
+                    clear_button = gr.Button("Clear Chat", variant="secondary", scale=1)
+                
+                gr.Markdown("### Sample Questions")
+                with gr.Row():
+                    sample_btn1 = gr.Button("What paint is best for kitchen cabinets?")
+                    sample_btn2 = gr.Button("How much does Sherwin-Williams Emerald cost?")
+                
+                with gr.Row():
+                    sample_btn3 = gr.Button("What's the difference between interior and exterior paint?")
+                    sample_btn4 = gr.Button("What supplies do I need for painting my living room?")
+            
+            # Right column for Chain of Thought
+            with gr.Column(scale=4):
+                gr.Markdown("### 🔄 Chain of Thought")
+                gr.Markdown("See the agent's reasoning process")
+                cot_output = gr.Markdown("")
+        
+        # Define clear_chat with initialize_message closure
+        def clear_chat_with_message():
+            return clear_chat(initialize_message)
+        
+        # Event handlers
+        submit_button.click(
+            user_message, 
+            [question_input, chatbot], 
+            [question_input, chatbot]
+        ).then(
+            bot_message, 
+            [chatbot], 
+            [chatbot, cot_output]
         )
         
-        # Restore stdout
-        sys.stdout = original_stdout
+        question_input.submit(
+            user_message, 
+            [question_input, chatbot], 
+            [question_input, chatbot]
+        ).then(
+            bot_message, 
+            [chatbot], 
+            [chatbot, cot_output]
+        )
         
-        # Get the captured output for debugging
-        debug_output = captured_output.getvalue()
-        print(f"DEBUG: Agent process: {debug_output}")
+        clear_button.click(
+            clear_chat_with_message,
+            [],
+            [chatbot, question_input, cot_output]
+        )
         
-        # Extract the final answer (not the thinking process)
-        final_response = response.response
+        # Sample question event handlers
+        for btn in [sample_btn1, sample_btn2, sample_btn3, sample_btn4]:
+            btn.click(
+                use_sample_question, 
+                [btn, chatbot], 
+                [question_input, chatbot]
+            ).then(
+                bot_message, 
+                [chatbot], 
+                [chatbot, cot_output]
+            )
         
-        # Check if response contains Action/Thought patterns and extract only final answer if needed
-        if "Action:" in final_response or "Thought:" in final_response:
-            # Extract just the final answer if it exists
-            if "Answer:" in final_response:
-                answer_parts = final_response.split("Answer:")
-                if len(answer_parts) > 1:
-                    final_response = answer_parts[1].strip()
-            
-        # Extract agent reasoning if available (for metadata/accordion)
-        thinking = None
-        if hasattr(response, 'sources') and response.sources:
-            # Format agent reasoning and tool usage for display
-            thinking = []
-            for source in response.sources:
-                if isinstance(source, list) and source:
-                    for step in source:
-                        if hasattr(step, 'tool_name'):
-                            thinking.append(f"Used tool: {step.tool_name}")
-                            thinking.append(f"Tool input: {step.tool_input}")
-                            thinking.append(f"Tool output: {step.observation}")
-        
-        # Update with final response, including thinking if available
-        if thinking:
-            history[-1] = {
-                "role": "assistant", 
-                "content": final_response,
-                "metadata": {"title": "Agent Reasoning", "content": "\n".join(thinking)}
-            }
-        else:
-            history[-1] = {"role": "assistant", "content": final_response}
-            
-        yield history
-            
-    except Exception as e:
-        error_msg = f"Error: {str(e)}"
-        print(f"Error in gradio_chat: {error_msg}")
-        print(f"Error details: {repr(e)}")
-        
-        # Replace typing indicator with error message
-        history[-1] = {"role": "assistant", "content": f"I encountered an error: {error_msg}"}
-        yield history
+    return demo
 
-# Create Gradio interface
-with gr.Blocks() as demo:
-    gr.Markdown("# AI Assistant with Image Analysis")
-    
-    with gr.Row():
-        with gr.Column(scale=4):
-            chatbot = gr.Chatbot(height=600, type="messages")
-            with gr.Row():
-                msg = gr.Textbox(
-                    label="Message",
-                    placeholder="Type your message here...",
-                    show_label=False,
-                    container=False
-                )
-                image_input = gr.Image(type="filepath", label="Upload Image (Optional)")
-                submit_btn = gr.Button("Send")
-    
-    clear_btn = gr.Button("Clear Conversation")
-    
-    # Clear conversation handler
-    def clear_conversation():
-        return None, None, []
-    
-    # Set up event handlers
-    submit_btn.click(
-        gradio_chat,
-        inputs=[msg, chatbot, image_input],
-        outputs=[chatbot]
-    ).then(
-        lambda: ("", None),
-        None,
-        [msg, image_input]
-    )
-    
-    msg.submit(
-        gradio_chat,
-        inputs=[msg, chatbot, image_input],
-        outputs=[chatbot]
-    ).then(
-        lambda: ("", None),
-        None,
-        [msg, image_input]
-    )
-    
-    clear_btn.click(
-        clear_conversation,
-        None,
-        [msg, image_input, chatbot]
-    )
+def main():
+    """Main entry point for the application"""
+    demo = create_ui()
+    # Launch server with queue enabled for better handling of multiple requests
+    demo.queue().launch(share=False)
 
 if __name__ == "__main__":
-    demo.launch()
+    main() 
