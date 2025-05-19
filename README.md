@@ -2,14 +2,6 @@
 
 This project implements an intelligent retail operations assistant using Retrieval-Augmented Generation (RAG) with FAISS vector storage for persistence and a dual-display chat interface showing both answers and reasoning.
 
-## Disclaimer
-
-**IMPORTANT**: This application uses fictional data for demonstration purposes only. The information provided by this system should not be used for actual business decisions. Please refer to the [DISCLAIMER.md](DISCLAIMER.md) file for comprehensive legal information regarding the use of this software.
-
-## License
-
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
 ## Architecture
 
 The system follows a RAG (Retrieval-Augmented Generation) architecture that combines vector search with large language models:
@@ -18,7 +10,9 @@ The system follows a RAG (Retrieval-Augmented Generation) architecture that comb
 
 ## Demo (youtube)
 
-[![Demo](https://img.youtube.com/vi/IxIhe4VsCm8/0.jpg)](https://www.youtube.com/watch?v=IxIhe4VsCm8)
+<a href="https://www.youtube.com/watch?v=IxIhe4VsCm8">
+  <img src="https://github.com/user-attachments/assets/d06a06a9-c0a0-4e32-b94c-747125f699c6" width="400"/>
+</a>
 
 ## Setup
 
@@ -148,3 +142,11 @@ This system demonstrates modern RAG techniques with the following components:
 - Gradio for the web interface
 - ReAct agent pattern for step-by-step reasoning
 - NVIDIA API for LLM inference and embeddings 
+
+## Disclaimer
+
+**IMPORTANT**: This application uses fictional data for demonstration purposes only. The information provided by this system should not be used for actual business decisions. Please refer to the [DISCLAIMER.md](DISCLAIMER.md) file for comprehensive legal information regarding the use of this software.
+
+## License
+
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
