@@ -13,9 +13,9 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 ## Architecture
 
 The system follows a RAG (Retrieval-Augmented Generation) architecture that combines vector search with large language models:
-<center>
-    <img src="https://github.com/user-attachments/assets/cc9fd64a-0a04-478a-9149-5d11d8eff9d1" width="500"/>x
-</center>
+
+<img src="https://github.com/user-attachments/assets/cc9fd64a-0a04-478a-9149-5d11d8eff9d1" width="500" style="display: block; margin: 0 auto" />
+
 ## Demo (youtube)
 
 [![Demo](https://img.youtube.com/vi/IxIhe4VsCm8/0.jpg)](https://www.youtube.com/watch?v=IxIhe4VsCm8)
