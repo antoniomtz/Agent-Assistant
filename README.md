@@ -1,6 +1,14 @@
 # RAG Assistant with FAISS vector storage
 
-This project implements an intelligent paint product assistant using Retrieval-Augmented Generation (RAG) with FAISS vector storage for persistence and a dual-display chat interface showing both answers and reasoning.
+This project implements an intelligent retail operations assistant using Retrieval-Augmented Generation (RAG) with FAISS vector storage for persistence and a dual-display chat interface showing both answers and reasoning.
+
+## Disclaimer
+
+**IMPORTANT**: This application uses fictional data for demonstration purposes only. The information provided by this system should not be used for actual business decisions. Please refer to the [DISCLAIMER.md](DISCLAIMER.md) file for comprehensive legal information regarding the use of this software.
+
+## License
+
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ## Setup
 
@@ -62,6 +70,17 @@ This application leverages powerful AI models through NVIDIA's API:
 
 Both models are accessed through the NVIDIA API for optimal performance.
 
+## NVIDIA API Cold Start
+
+**Note about first-time usage**: The NVIDIA API may experience "cold start" issues when first initialized. The first 2-3 queries to the system might fail or timeout while the API resources are being allocated. This is normal behavior for cloud-based AI services.
+
+If you receive errors on your first few queries:
+- Wait a few seconds and try again
+- Keep trying up to 3 times
+- After 2-3 attempts, the API should stabilize and respond normally
+
+This cold start behavior only affects the system after fresh initialization or long periods of inactivity.
+
 ## Features
 
 - **Dual-Display Interface**: 
@@ -76,14 +95,14 @@ Both models are accessed through the NVIDIA API for optimal performance.
   - 📥 Action Input - showing the parameters for the tool
   - 👁️ Observation - showing results from the tool
   - ✅ Answer - final conclusion after reasoning
-- **Sample Questions**: Quick-access buttons for common paint queries
+- **Sample Questions**: Quick-access buttons for common retail queries
 - **Automatic Initialization**: System initializes on startup
 
 ## How It Works
 
 1. **Document Processing**:
-   - Documents are loaded from the `test_data` directory
-   - They are chunked into smaller pieces and embedded using NVIDIA's embedding model
+   - Retail operations manual is loaded from the `test_data` directory
+   - Content is chunked into smaller pieces and embedded using NVIDIA's embedding model
    - Embeddings are stored in a FAISS vector store for efficient similarity search
 
 2. **Vector Persistence**:
@@ -92,14 +111,14 @@ Both models are accessed through the NVIDIA API for optimal performance.
    - When run again, the system loads existing embeddings rather than reprocessing
 
 3. **Query Handling**:
-   - The ReAct agent receives user questions through the chat interface
-   - It determines when to use the RAG tool to retrieve relevant context
+   - The ReAct agent receives employee questions through the chat interface
+   - It determines when to use the RAG tool to retrieve relevant context from the operations manual
    - All reasoning steps are captured and displayed in the Chain of Thought panel
    - Final answers are displayed in the chat interface
 
 ## Using the Interface
 
-1. Type your question in the text field (e.g., "What paint is best for kitchen cabinets?")
+1. Type your question in the text field (e.g., "How do I process a return?")
 2. Press Enter or click "Submit" to get a response
 3. Watch the Chain of Thought panel to see the agent's reasoning process
 4. Use the sample question buttons for quick access to common queries
@@ -107,7 +126,7 @@ Both models are accessed through the NVIDIA API for optimal performance.
 
 ## Directories
 
-- `stored_indexes/` - Contains the persisted FAISS indexes
+- `stored_indexes/` - Contains the persisted FAISS indexes (it will be created during runtime)
 - `test_data/` - Place your PDF documents here
 
 ## Technical Details

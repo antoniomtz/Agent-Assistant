@@ -235,21 +235,11 @@ def setup_rag_agent(index, llm):
     rag_tool = QueryEngineTool(
         query_engine=query_engine,
         metadata=ToolMetadata(
-            name="paint_info",
-            description="""
-                Use this tool for ANY question about paint products, recommendations, prices, or technical specifications.
-            
-                WHEN TO USE:
-                - User asks about paint types, brands, or products
-                - User needs price information before adding to cart
-                - User needs recommendations based on their project
-                - User has technical questions about painting
-                
-                EXAMPLES:
-                - "What paint is best for kitchen cabinets?"
-                - "How much does AwesomePainter Interior Acrylic Latex cost?"
-                - "What supplies do I need for painting my living room?"
-            """,
+            name="retail_operations_manual",
+            description= "Use this tool to answer questions about retail operations, "
+            "store procedures, product catalog, employee guidelines, pricing policies, "
+            "and customer FAQs. The source contains inventory data, return policies, "
+            "opening/closing checklists, promotions, and product descriptions.",
         ),
     )
     
@@ -272,11 +262,11 @@ def initialize_system():
         
         # Create path to the sample file
         script_dir = Path(__file__).parent
-        sample_file = script_dir / "test_data" / "test_painting_llm_rag.pdf"
+        sample_file = script_dir / "test_data" / "retail-manual.pdf"
         
         # Ensure the test_data directory exists
         if not sample_file.exists():
-            return f"Error: Sample file not found at {sample_file}. Make sure the test_data directory contains test_painting_llm_rag.pdf"
+            return f"Error: Sample file not found at {sample_file}. Make sure the test_data directory contains retail-manual.pdf"
         
         # Create index
         current_index = create_index_from_file(sample_file, force_reload=False)
@@ -346,10 +336,9 @@ def bot_message(history):
         
         # Add performance information
         query_time = end_time - start_time
-        performance_info = f"\n\n*Query processed in {query_time:.2f} seconds*"
         
         # Add agent's response to chat history
-        history.append({"role": "assistant", "content": str(response) + performance_info})
+        history.append({"role": "assistant", "content": str(response)})
         
         return history, formatted_cot
     except Exception as e:
@@ -370,9 +359,18 @@ def create_ui():
     # Initialize the system on startup
     initialize_message = initialize_system()
     
-    with gr.Blocks(title="RAG Assistant", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("# 🎨 Paint Product RAG Assistant")
-        gr.Markdown("Ask questions about paint products, recommendations, prices, or technical specifications.")
+    with gr.Blocks(title="Retail Operations Assistant", theme=gr.themes.Soft()) as demo:
+        gr.Markdown("# 🏪 Retail Operations Assistant")
+        gr.Markdown("Ask questions about products, store policies, customer service procedures, returns, promotions, and more.")
+        
+        # Disclaimer notice
+        with gr.Accordion("⚠️ Disclaimer", open=False):
+            gr.Markdown("""
+            **Important Notice**: This system is a demonstration using entirely fictional data. 
+            Information provided should not be used for real-world decisions or business operations.
+            All product information, prices, and recommendations are fictional and created for
+            educational purposes only. See DISCLAIMER.md for full legal details.
+            """)
         
         with gr.Row():
             # Left column for chat
@@ -396,12 +394,12 @@ def create_ui():
                 
                 gr.Markdown("### Sample Questions")
                 with gr.Row():
-                    sample_btn1 = gr.Button("What paint is best for kitchen cabinets?")
-                    sample_btn2 = gr.Button("How much does Sherwin-Williams Emerald cost?")
+                    sample_btn1 = gr.Button("How do I process a return for an online order in the store?")
+                    sample_btn2 = gr.Button("What is the price of Compact Treadmill?")
                 
                 with gr.Row():
-                    sample_btn3 = gr.Button("What's the difference between interior and exterior paint?")
-                    sample_btn4 = gr.Button("What supplies do I need for painting my living room?")
+                    sample_btn3 = gr.Button("What are the store opening and closing procedures?")
+                    sample_btn4 = gr.Button("Tell me more about the back-to-school tech promotion")
             
             # Right column for Chain of Thought
             with gr.Column(scale=4):
